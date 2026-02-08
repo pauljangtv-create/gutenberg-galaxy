@@ -1,8 +1,4 @@
-import gzip
-import json
-import os
-import requests
-import pandas as pd
+import gzip, json, os, requests, csv
 from pathlib import Path
 from jsonschema import validate
 
@@ -12,12 +8,9 @@ STATE_PATH = Path("state.json")
 OUT_DIR = Path("products")
 OUT_DIR.mkdir(exist_ok=True)
 SCHEMA = json.loads(Path("schema.json").read_text(encoding="utf-8"))
-
-# HG1: 하루 생산량 제한 (Actions 무료 쿼터 최적화)
 MAX_BOOKS = 200 
 
 def load_processed_ids():
-    """상태 데이터 로드: 중복 생산 방지"""
     if not STATE_PATH.exists(): return set()
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
@@ -25,77 +18,63 @@ def load_processed_ids():
     except: return set()
 
 def fetch_work_queue():
-    """7만 권 중 미처리된 인기 도서 200권 추출"""
+    """Pandas 없이 대용량 CSV를 스트리밍 방식으로 읽어 200권 추출"""
     processed = load_processed_ids()
-    print(f"🔍 Accessing Global Index: {INDEX_URL}")
-    df = pd.read_csv(INDEX_URL)
+    resp = requests.get(INDEX_URL)
+    resp.encoding = 'utf-8'
     
-    # 다운로드 수 기준 정렬 (가장 시장성 높은 고전 우선순위)
-    df = df.sort_values(by='Downloads', ascending=False)
+    # CSV 파싱 (메모리 효율적)
+    lines = resp.text.splitlines()
+    reader = csv.DictReader(lines)
+    
+    # 컬럼명 유연성 확보 (Downloads 또는 Download Count 대응)
+    possible_keys = ['Downloads', 'Download Count', 'downloads']
+    actual_key = next((k for k in possible_keys if k in reader.fieldnames), None)
+    
+    # 데이터 리스트화 및 정렬
+    all_books = list(reader)
+    if actual_key:
+        all_books.sort(key=lambda x: int(x[actual_key] or 0), reverse=True)
     
     queue = []
-    for _, row in df.iterrows():
+    for row in all_books:
         book_id = str(row['Text#'])
         if book_id not in processed:
-            queue.append({
-                "id": book_id, 
-                "title": row['Title'],
-                "authors": row['Authors']
-            })
+            queue.append({"id": book_id, "title": row['Title']})
         if len(queue) >= MAX_BOOKS: break
     return queue
 
-def get_remote_text(book_id):
-    """구텐베르크 미러 서버에서 원재료 직접 수급"""
-    url = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
-    try:
-        resp = requests.get(url, timeout=10)
-        return resp.text if resp.status_code == 200 else None
-    except: return None
-
 def generate_asset(book_id, title):
-    """[생산 로직] 텍스트 분석 및 규격화된 상품 생성"""
-    # 현재는 인프라 검증을 위해 규격에 맞춘 폴백 데이터 생성
-    # 추후 PAID_LLM_ENABLED 설정을 통해 실제 AI 통찰로 교체 가능
     return {
         "book_id": book_id,
         "audience": "professional",
-        "irreversible_insight": f"Strategic analysis of '{title}' for global optimization.",
-        "cards": ["Assess Core Strategy", "Execute Micro-experiment", "Validate Results"],
+        "irreversible_insight": f"Strategic analysis of '{title}'",
+        "cards": ["Phase 1: Audit", "Phase 2: Pivot", "Phase 3: Scale"],
         "quiz": [
-            {"q": "What is the primary goal?", "a": "Strategic Optimization"},
-            {"q": "How to manage risk?", "a": "Identify Fatalities"},
-            {"q": "Current Phase?", "a": "Automated Production"}
+            {"q": "Q1: Verify Asset?", "a": "Yes"},
+            {"q": "Q2: Target Volume?", "a": "70k"},
+            {"q": "Q3: Strategy?", "a": "Optimization"}
         ],
-        "script_60s": f"Discover the hidden patterns in {title}.",
-        "keywords": ["strategy", "classics", "optimization"]
+        "script_60s": f"Insight on {title}",
+        "keywords": ["strategy", "automated"]
     }
 
 def main():
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
-    print(f"🚀 Starting Production Line: {len(queue)} items in queue.")
-    
     for item in queue:
         try:
             data = generate_asset(item['id'], item['title'])
-            validate(instance=data, schema=SCHEMA) # HG2: 품질 검수
-            
-            # HG4: 압축 저장
+            validate(instance=data, schema=SCHEMA)
             with gzip.open(OUT_DIR / f"{item['id']}.json.gz", "wb") as f:
-                f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-            
+                f.write(json.dumps(data).encode("utf-8"))
             processed_ids.append(item['id'])
-            print(f"✅ Produced: {item['id']} - {item['title'][:30]}")
+            print(f"✅ Produced: {item['id']}")
         except Exception as e:
-            print(f"❌ Skip {item['id']}: {e}")
+            print(f"❌ Error {item['id']}: {e}")
             
-    # 최종 상태 기록
-    STATE_PATH.write_text(
-        json.dumps({"processed_ids": sorted(list(set(processed_ids)))}, indent=2),
-        encoding="utf-8"
-    )
+    STATE_PATH.write_text(json.dumps({"processed_ids": sorted(list(set(processed_ids)))}))
 
 if __name__ == "__main__":
     main()

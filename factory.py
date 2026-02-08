@@ -1,31 +1,45 @@
 import gzip, json, os, requests, csv, sys, time
 from pathlib import Path
 from jsonschema import validate
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import logging
+from enum import Enum
 
 # [설정] 인프라 및 경로
 INDEX_URL = "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
 STATE_PATH = Path("state.json")
 OUT_DIR = Path("products")
 OUT_DIR.mkdir(exist_ok=True)
-MAX_BOOKS = 5
+MAX_BOOKS = 20  # 생산량 증가 (하이브리드 시스템)
 
-# [보안] GitHub Secrets에서 API 키 로드
+# [보안] Multi-AI API 키 로드
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # ChatGPT
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # Claude
+
+# [전략] 2-Track Production System
+HIGH_VALUE_THRESHOLD = 0.2  # 상위 20%는 3-AI 교차 검증
+TRACK_1_PERCENTILE = HIGH_VALUE_THRESHOLD  # Premium Track
+TRACK_2_PERCENTILE = 1.0 - HIGH_VALUE_THRESHOLD  # Standard Track
 
 # [리스크 제어] Rate Limit 및 재시도 설정
-RATE_LIMIT_RPM = 15  # Gemini 무료 티어
-RATE_LIMIT_DELAY = 60 / RATE_LIMIT_RPM + 0.5  # 4.5초 (안전 여유)
+GEMINI_RPM = 15
+OPENAI_RPM = 3  # GPT-4o-mini 무료 티어
+CLAUDE_RPM = 5  # Claude Sonnet 무료 티어
 MAX_RETRIES = 3
-RETRY_BACKOFF_BASE = 2  # 지수 백오프 베이스
+RETRY_BACKOFF_BASE = 2
 
-# [로깅] 구조화된 에러 추적
+# [로깅]
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class ProcessingTier(Enum):
+    """생산 등급 분류"""
+    PREMIUM = "3-AI Cross-Validation"  # ChatGPT → Claude → Gemini
+    STANDARD = "Single-AI Fast Track"  # Gemini Only
 
 # [HG2] Schema 로드
 try:
@@ -45,7 +59,7 @@ def load_processed_ids():
         return set()
 
 def fetch_work_queue():
-    """7만 권 목록 중 고가치 자산 추출 (제목+저자 메타데이터 포함)"""
+    """작업 큐 추출 + 다운로드 순위 메타데이터"""
     processed = load_processed_ids()
     
     try:
@@ -58,7 +72,6 @@ def fetch_work_queue():
     resp.encoding = 'utf-8'
     reader = csv.DictReader(resp.text.splitlines())
     
-    # 컬럼명 정규화
     fieldnames = {k.strip(): k for k in (reader.fieldnames or [])}
     text_key = fieldnames.get('Text#')
     title_key = fieldnames.get('Title')
@@ -74,135 +87,252 @@ def fetch_work_queue():
         all_books.sort(key=lambda x: int(x.get(actual_key, 0) or 0), reverse=True)
     
     queue = []
-    for row in all_books:
+    for idx, row in enumerate(all_books):
         book_id = row.get(text_key, '').strip() if text_key else ''
         if book_id and book_id not in processed:
+            downloads = int(row.get(actual_key, 0) or 0) if actual_key else 0
             queue.append({
                 "id": book_id, 
                 "title": row.get(title_key, 'Unknown Title').strip(),
                 "author": row.get(author_key, 'Unknown Author').strip() if author_key else 'Unknown Author',
-                "subjects": row.get(subjects_key, '').strip() if subjects_key else ''
+                "subjects": row.get(subjects_key, '').strip() if subjects_key else '',
+                "downloads": downloads,
+                "rank": idx + 1  # 다운로드 순위
             })
         if len(queue) >= MAX_BOOKS: 
             break
     return queue
 
-def get_ai_insight(title: str, author: str, subjects: str) -> Optional[str]:
+# ============================================================
+# [AI 브레인 모듈화] The Handlers
+# ============================================================
+
+def call_chatgpt_api(prompt: str, max_tokens: int = 300) -> Optional[str]:
     """
-    [Antifragile AI 호출] 재시도 + 지수 백오프 + 에러 타입별 격리
+    ChatGPT (Strategy): 고전 서사 → 금융 전략 가설 수립
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("OpenAI API Key missing")
+        return None
+    
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "gpt-4o-mini",  # 무료 티어
+        "messages": [
+            {"role": "system", "content": "You are a strategic financial analyst specializing in extracting business insights from classic literature."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7
+    }
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            time.sleep(60 / OPENAI_RPM + 1)  # Rate limit
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
+            
+            if response.status_code == 200:
+                result = response.json()['choices'][0]['message']['content'].strip()
+                logger.info(f"✅ ChatGPT success")
+                return result
+            elif response.status_code == 429:
+                logger.warning(f"⏳ ChatGPT Rate Limit (attempt {attempt+1})")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_BASE ** attempt * 5)
+                    continue
+            else:
+                logger.error(f"❌ ChatGPT error {response.status_code}: {response.text[:100]}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"💥 ChatGPT exception: {e}")
+            if attempt < MAX_RETRIES - 1:
+                continue
+            return None
+    
+    return None
+
+def call_claude_api(prompt: str, max_tokens: int = 300) -> Optional[str]:
+    """
+    Claude (Auditor): ChatGPT 결과 → 논리 검증 + 비즈니스 언어 압축
+    """
+    if not ANTHROPIC_API_KEY:
+        logger.warning("Anthropic API Key missing")
+        return None
+    
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "claude-3-5-haiku-20241022",  # 빠른 모델
+        "max_tokens": max_tokens,
+        "messages": [
+            {
+                "role": "user", 
+                "content": f"As a business auditor, refine and compress this strategic insight into precise, actionable language (under 200 chars):\n\n{prompt}"
+            }
+        ]
+    }
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            time.sleep(60 / CLAUDE_RPM + 1)  # Rate limit
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
+            
+            if response.status_code == 200:
+                result = response.json()['content'][0]['text'].strip()
+                logger.info(f"✅ Claude success")
+                return result
+            elif response.status_code == 429:
+                logger.warning(f"⏳ Claude Rate Limit (attempt {attempt+1})")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_BASE ** attempt * 5)
+                    continue
+            else:
+                logger.error(f"❌ Claude error {response.status_code}: {response.text[:100]}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"💥 Claude exception: {e}")
+            if attempt < MAX_RETRIES - 1:
+                continue
+            return None
+    
+    return None
+
+def call_gemini_api(prompt: str) -> Optional[str]:
+    """
+    Gemini (Executor): 최종 정제 → JSON 구조화 및 대량 양산
     """
     if not GEMINI_API_KEY:
-        logger.warning(f"API Key missing for '{title}'")
+        logger.warning("Gemini API Key missing")
         return None
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
-    context = f"Author: {author}" if author != 'Unknown Author' else ""
-    if subjects:
-        context += f" | Genre/Subjects: {subjects[:100]}"
-    
-    prompt = {
+    payload = {
         "contents": [{
-            "parts": [{
-                "text": (
-                    f"Book Title: '{title}'\n"
-                    f"{context}\n\n"
-                    f"Task: Extract ONE UNIQUE strategic business insight from THIS SPECIFIC BOOK "
-                    f"for global financial architecture optimization. "
-                    f"Do NOT use generic advice like 'optimize resources' or 'be strategic'. "
-                    f"Reflect the book's SPECIFIC themes, plot, or philosophical arguments. "
-                    f"Must be actionable and distinctive to THIS book. "
-                    f"Keep it under 200 characters in English."
-                )
-            }]
+            "parts": [{"text": prompt}]
         }]
     }
     
-    # [핵심] 재시도 로직 with 지수 백오프
     for attempt in range(MAX_RETRIES):
         try:
-            # Rate Limit 방어: 요청 '전' 대기
-            if attempt > 0:
-                backoff_delay = RATE_LIMIT_DELAY * (RETRY_BACKOFF_BASE ** (attempt - 1))
-                logger.info(f"Retry {attempt}/{MAX_RETRIES} for '{title}' after {backoff_delay:.1f}s")
-                time.sleep(backoff_delay)
-            else:
-                time.sleep(RATE_LIMIT_DELAY)
+            time.sleep(60 / GEMINI_RPM + 0.5)  # Rate limit
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
             
-            response = requests.post(url, headers=headers, json=prompt, timeout=20)
-            
-            # [에러 타입별 분기]
             if response.status_code == 200:
-                insight = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-                logger.info(f"✅ AI success for '{title[:30]}'")
-                return insight
-            
+                result = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                logger.info(f"✅ Gemini success")
+                return result
             elif response.status_code == 429:
-                # Rate Limit: 재시도 가능
-                logger.warning(f"⏳ Rate Limit hit for '{title}' (attempt {attempt+1})")
+                logger.warning(f"⏳ Gemini Rate Limit (attempt {attempt+1})")
                 if attempt < MAX_RETRIES - 1:
-                    continue  # 재시도
-                else:
-                    logger.error(f"❌ Rate Limit exhausted for '{title}'")
-                    return None
-            
-            elif response.status_code >= 500:
-                # Server Error: 재시도 가능
-                logger.warning(f"🔧 Server error {response.status_code} for '{title}' (attempt {attempt+1})")
-                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_BASE ** attempt * 4)
                     continue
-                else:
-                    logger.error(f"❌ Server errors exhausted for '{title}'")
-                    return None
-            
-            elif response.status_code == 403:
-                # Forbidden: API 키 문제, 재시도 불가
-                logger.critical(f"🛑 API Key invalid for '{title}': {response.text[:100]}")
-                return None
-            
             else:
-                # 기타 클라이언트 에러: 재시도 불가
-                logger.error(f"❌ HTTP {response.status_code} for '{title}': {response.text[:100]}")
+                logger.error(f"❌ Gemini error {response.status_code}: {response.text[:100]}")
                 return None
                 
-        except requests.Timeout:
-            logger.warning(f"⏱️ Timeout for '{title}' (attempt {attempt+1})")
-            if attempt < MAX_RETRIES - 1:
-                continue
-            else:
-                logger.error(f"❌ Timeout exhausted for '{title}'")
-                return None
-        
-        except requests.RequestException as e:
-            logger.error(f"🌐 Network error for '{title}': {e}")
-            if attempt < MAX_RETRIES - 1:
-                continue
-            else:
-                return None
-        
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
-            # 응답 파싱 에러: 재시도 불가
-            logger.error(f"🔍 Response parse error for '{title}': {e}")
-            return None
-        
         except Exception as e:
-            # 예상치 못한 에러: 격리
-            logger.critical(f"💥 Unexpected error for '{title}': {type(e).__name__} - {e}")
+            logger.error(f"💥 Gemini exception: {e}")
+            if attempt < MAX_RETRIES - 1:
+                continue
             return None
     
-    return None  # 모든 재시도 실패
+    return None
 
-def generate_asset(book_id: str, title: str, author: str, subjects: str) -> Optional[Dict[str, Any]]:
+# ============================================================
+# [하이브리드 추론 엔진] Orchestration Logic
+# ============================================================
+
+def process_premium_asset(title: str, author: str, subjects: str) -> Optional[str]:
     """
-    [Step 2] 데이터 구조 내 출처 명시 및 AI 통찰 주입
+    🏆 Premium Track: 3-AI 순차 파이프라인
+    ChatGPT (가설) → Claude (감사) → Gemini (구조화)
     """
-    # AI 지능 주입 (Antifragile 호출)
-    insight = get_ai_insight(title, author, subjects)
+    logger.info(f"🏆 [PREMIUM] Starting 3-AI pipeline for '{title[:30]}'")
     
-    # [핵심] AI 실패 시 None 반환 (State 오염 방지)
+    # Stage 1: ChatGPT - 전략 가설 수립
+    context = f"Author: {author}" if author != 'Unknown Author' else ""
+    if subjects:
+        context += f" | Genre: {subjects[:80]}"
+    
+    hypothesis_prompt = (
+        f"Book: '{title}'\n{context}\n\n"
+        f"Extract ONE strategic financial hypothesis from this book's themes. "
+        f"Focus on architectural patterns applicable to global finance."
+    )
+    
+    hypothesis = call_chatgpt_api(hypothesis_prompt)
+    if not hypothesis:
+        logger.warning(f"⚠️ ChatGPT failed, falling back to standard track")
+        return process_standard_asset(title, author, subjects)
+    
+    logger.info(f"📝 Hypothesis: {hypothesis[:60]}...")
+    
+    # Stage 2: Claude - 논리 감사 및 압축
+    audit_prompt = f"Original hypothesis: {hypothesis}\n\nRefine this into a precise, actionable business insight."
+    
+    refined = call_claude_api(audit_prompt)
+    if not refined:
+        logger.warning(f"⚠️ Claude failed, using ChatGPT output")
+        refined = hypothesis
+    
+    logger.info(f"🔍 Refined: {refined[:60]}...")
+    
+    # Stage 3: Gemini - 최종 검증 및 압축
+    final_prompt = (
+        f"Compress this business insight to under 200 characters while preserving actionability:\n\n{refined}"
+    )
+    
+    final_insight = call_gemini_api(final_prompt)
+    if not final_insight:
+        logger.warning(f"⚠️ Gemini failed, using Claude output")
+        final_insight = refined
+    
+    return final_insight
+
+def process_standard_asset(title: str, author: str, subjects: str) -> Optional[str]:
+    """
+    ⚡ Standard Track: Gemini 단독 고속 처리
+    """
+    logger.info(f"⚡ [STANDARD] Fast track for '{title[:30]}'")
+    
+    context = f"Author: {author}" if author != 'Unknown Author' else ""
+    if subjects:
+        context += f" | Genre: {subjects[:80]}"
+    
+    prompt = (
+        f"Book: '{title}'\n{context}\n\n"
+        f"Extract ONE UNIQUE strategic business insight for financial architecture. "
+        f"Be specific to this book's themes. Under 200 characters."
+    )
+    
+    return call_gemini_api(prompt)
+
+def generate_asset(book_id: str, title: str, author: str, subjects: str, tier: ProcessingTier) -> Optional[Dict[str, Any]]:
+    """
+    [하이브리드 생산 엔진] Tier에 따라 분기 처리
+    """
+    # AI 추론 파이프라인 선택
+    if tier == ProcessingTier.PREMIUM:
+        insight = process_premium_asset(title, author, subjects)
+    else:
+        insight = process_standard_asset(title, author, subjects)
+    
     if insight is None:
-        logger.warning(f"⚠️ Skipping asset for '{title}' due to AI failure")
+        logger.warning(f"⚠️ All AI tracks failed for '{title}'")
         return None
     
     safe_title = str(title or "Unknown")[:80]
@@ -212,24 +342,25 @@ def generate_asset(book_id: str, title: str, author: str, subjects: str) -> Opti
         "book_id": str(book_id),
         "source_book": safe_title,
         "source_author": safe_author,
+        "processing_tier": tier.value,  # 메타데이터: 어떤 파이프라인 사용했는지
         "audience": "professional",
         "irreversible_insight": insight,
         "cards": [
-            f"Structural Audit: Analyze '{safe_title[:30]}' patterns",
-            f"Strategic Pivot: Apply {safe_author}'s framework", 
+            f"Structural Audit: {safe_title[:30]} patterns",
+            f"Strategic Pivot: {safe_author}'s framework", 
             "Scalable Growth: Standardize architecture"
         ],
         "quiz": [
-            {"q": f"Core insight of '{safe_title[:30]}'?", "a": "Book-specific optimization"},
-            {"q": f"Who wrote this?", "a": safe_author},
+            {"q": f"Core insight of '{safe_title[:30]}'?", "a": "Book-specific strategy"},
+            {"q": f"Author?", "a": safe_author},
             {"q": "Application?", "a": "Financial architecture"}
         ],
-        "script_60s": f"AI-powered insight from '{safe_title}' by {safe_author}.",
-        "keywords": ["AI-Insight", safe_author.split()[0] if safe_author else "Strategy", "Book-Analysis"]
+        "script_60s": f"Hybrid AI insight from '{safe_title}' by {safe_author}.",
+        "keywords": ["Multi-AI", safe_author.split()[0] if safe_author else "Strategy", tier.name]
     }
 
 def generate_sitemap(processed_ids):
-    """모든 자산을 구글에 신고하기 위한 sitemap.xml 생성"""
+    """SEO 사이트맵 생성"""
     base_url = "https://pauljangtv-create.github.io/gutenberg-galaxy/"
     sitemap = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     
@@ -241,12 +372,12 @@ def generate_sitemap(processed_ids):
     sitemap.append('</urlset>')
     Path("sitemap.xml").write_text("\n".join(sitemap), encoding="utf-8")
     Path("robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base_url}sitemap.xml", encoding="utf-8")
-    logger.info("✅ Sitemap generated for SEO")
+    logger.info("✅ Sitemap generated")
 
 def main():
     """
-    [Antifragile Control System]
-    HG3: Cost Guard with AI API validation
+    [Hybrid AI Orchestration System]
+    2-Track Production: Premium (3-AI) + Standard (1-AI)
     """
     
     # --- [HG3] COST GUARD START (DO NOT REMOVE) ---
@@ -255,8 +386,7 @@ def main():
     current_estimated_cost = 0.0
     
     if not GEMINI_API_KEY:
-        logger.critical("🛑 [FATALITY] GEMINI_API_KEY missing. System freeze.")
-        print("💡 Set GitHub Secret: GEMINI_API_KEY")
+        logger.critical("🛑 [FATALITY] GEMINI_API_KEY missing.")
         sys.exit(1)
     
     if PAID_LLM_ENABLED and current_estimated_cost > MAX_TOTAL_COST:
@@ -264,73 +394,89 @@ def main():
         sys.exit(1)
     # --- [HG3] COST GUARD END ---
 
-    logger.info(f"🛡️ [HG3 PASS] Risk/Cost safety verified: ${current_estimated_cost}")
-    logger.info(f"🤖 AI Mode: {'Enabled (Antifragile)' if PAID_LLM_ENABLED else 'Disabled'}")
-    logger.info(f"⚙️ Rate Limit: {RATE_LIMIT_RPM} RPM (delay: {RATE_LIMIT_DELAY:.1f}s)")
+    logger.info("=" * 70)
+    logger.info("🚀 Hybrid AI Orchestration System v2.0")
+    logger.info(f"🛡️ Cost Guard: ${current_estimated_cost} / ${MAX_TOTAL_COST}")
+    logger.info(f"🤖 AI Status: Gemini={'✅' if GEMINI_API_KEY else '❌'} | "
+                f"ChatGPT={'✅' if OPENAI_API_KEY else '❌'} | "
+                f"Claude={'✅' if ANTHROPIC_API_KEY else '❌'}")
+    logger.info("=" * 70)
 
-    # 1. 생산 준비 및 상태 로드
+    # 작업 큐 로드
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
     if not queue:
-        logger.info("⚠️ No pending tasks. System idling.")
+        logger.info("⚠️ No pending tasks.")
         return
 
-    logger.info(f"📋 Queue size: {len(queue)} books")
-
-    # 2. AI 기반 맞춤형 생산 루프 (Isolating Architecture)
-    success_count = 0
+    logger.info(f"📋 Queue: {len(queue)} books")
+    
+    # [2-Track 분기] 상위 20% vs 나머지
+    premium_cutoff = int(len(queue) * TRACK_1_PERCENTILE)
+    
+    premium_count = 0
+    standard_count = 0
     failure_count = 0
     
-    for item in queue:
+    for idx, item in enumerate(queue):
         try:
-            logger.info(f"🔄 Processing: {item['id']} - '{item['title'][:40]}' by {item['author'][:30]}")
+            # Tier 결정: 다운로드 순위 기반
+            tier = ProcessingTier.PREMIUM if idx < premium_cutoff else ProcessingTier.STANDARD
             
-            # AI로 개별 자산 생성 (None 반환 시 건너뜀)
+            logger.info(f"{'='*70}")
+            logger.info(f"🔄 [{idx+1}/{len(queue)}] {item['id']} - '{item['title'][:40]}'")
+            logger.info(f"📊 Rank: #{item['rank']} | Downloads: {item['downloads']:,} | Tier: {tier.name}")
+            
             data = generate_asset(
                 item['id'], 
                 item['title'], 
                 item['author'],
-                item['subjects']
+                item['subjects'],
+                tier
             )
             
-            # [핵심] AI 실패 시 State 오염 방지
             if data is None:
-                logger.warning(f"⏭️ Skipped: {item['id']} (AI failure)")
+                logger.warning(f"⏭️ Skipped: {item['id']}")
                 failure_count += 1
-                continue  # processed_ids에 추가하지 않음!
+                continue
             
             validate(instance=data, schema=SCHEMA)
             
-            # HG4: 압축 저장 및 자산화
+            # HG4: 압축 저장
             file_path = OUT_DIR / f"{item['id']}.json.gz"
             with gzip.open(file_path, "wb") as f:
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
-            # [핵심] 성공 시에만 State 업데이트
             processed_ids.append(item['id'])
-            success_count += 1
-            logger.info(f"✅ Produced: {item['id']} | Insight: {data['irreversible_insight'][:60]}...")
+            
+            if tier == ProcessingTier.PREMIUM:
+                premium_count += 1
+            else:
+                standard_count += 1
+            
+            logger.info(f"✅ Success | Insight: {data['irreversible_insight'][:60]}...")
             
         except Exception as e:
-            logger.error(f"💥 Unexpected error for {item['id']}: {type(e).__name__} - {e}")
+            logger.error(f"💥 Error for {item['id']}: {e}")
             failure_count += 1
-            continue  # 리스크 전이 방지
+            continue
 
-    # 3. 상태 기록 및 동기화 (성공한 것만)
+    # 상태 저장
     final_state = {"processed_ids": sorted(list(set(processed_ids)))}
     STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
     
-    # 4. SEO: Sitemap 생성
     generate_sitemap(processed_ids)
     
-    # 5. 최종 리포트
-    logger.info("=" * 60)
-    logger.info(f"🎉 Production complete")
-    logger.info(f"✅ Success: {success_count} assets")
+    # 최종 리포트
+    total = premium_count + standard_count
+    logger.info("=" * 70)
+    logger.info("🎉 Production Complete")
+    logger.info(f"🏆 Premium (3-AI): {premium_count} assets")
+    logger.info(f"⚡ Standard (1-AI): {standard_count} assets")
     logger.info(f"❌ Failures: {failure_count} assets")
-    logger.info(f"📊 Success Rate: {success_count/(success_count+failure_count)*100:.1f}%")
-    logger.info("=" * 60)
+    logger.info(f"📊 Success Rate: {total/(total+failure_count)*100:.1f}%" if total+failure_count > 0 else "N/A")
+    logger.info("=" * 70)
 
 if __name__ == "__main__":
     main()

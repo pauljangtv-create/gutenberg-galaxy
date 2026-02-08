@@ -2,8 +2,13 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/</loc><priority>1.0</priority></url>
 <url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=frankenstein</loc><priority>0.8</priority></url>
-<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=alice_in_wonderland</loc><priority>0.8</priority></url>
-<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=pride_and_prejudice</loc><priority>0.8</priority></url>
 <url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=sherlock_holmes</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=alice_in_wonderland</loc><priority>0.8</priority></url>
 <url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=moby_dick</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=pride_and_prejudice</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=1</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=2</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=3</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=4</loc><priority>0.8</priority></url>
+<url><loc>https://pauljangtv-create.github.io/gutenberg-galaxy/?id=5</loc><priority>0.8</priority></url>
 </urlset>

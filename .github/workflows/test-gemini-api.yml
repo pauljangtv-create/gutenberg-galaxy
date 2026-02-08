@@ -1,0 +1,19 @@
+name: test-gemini-api
+on:
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      
+      - name: Install requests
+        run: pip install requests
+      
+      - name: Run API Test
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python test_gemini_api.py

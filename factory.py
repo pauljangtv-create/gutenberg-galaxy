@@ -67,53 +67,50 @@ def generate_asset(book_id, title):
 
 def main():
     """
-    초효율 실행 엔진 메인 루프
-    HG3: Cost Guard - 분석 비용 및 자원 한계점 설정 (Antifragility)
+    [Strategic Action Engine]
+    HG3: Cost Guard - 분석 비용이 리스크 비용을 상회하기 전 의사결정 강제 종료
+    Rule: 최악의 시나리오(Fatality) 감지 시 즉시 중단(Freeze) 후 우회 설계
     """
-    # 1. [HG3] 비용 임계치 설정 (최악의 시나리오 방지)
-    # 분석 비용이 설정된 예산을 초과할 경우 즉시 시스템 중단(Freeze)
-    MAX_TOTAL_COST = 10.0  # 단위: USD
-    current_estimated_cost = 0.0  # 현재 무료 모드 운영 (추후 유료 LLM 연동 시 가산)
     
-    print(f"🛡️ [HG3 Check] Current Cost: ${current_estimated_cost} / Threshold: ${MAX_TOTAL_COST}")
+    # 1. 정량적 리스크 관리 (HG3 Cost Guard)
+    MAX_TOTAL_COST = 10.0  # 설정된 예산 한계점 ($)
+    current_estimated_cost = 0.0  # 현재 실행 비용 (무료 모드)
     
+    # 최악의 시나리오 산출: 비용 폭주로 인한 자산 손실
     if current_estimated_cost > MAX_TOTAL_COST:
-        print("🛑 [CRITICAL] Cost guard triggered. Freezing system to prevent fatality.")
-        return
+        print("🛑 [FATALITY] Cost threshold exceeded. Fatal risk detected.")
+        print("❄️ [FREEZE] Emergency system freeze initiated. Redesign required.")
+        return # 즉시 실행 중단 (Freeze)
 
-    # 2. 원재료 큐 확보 및 상태 로드
+    print(f"🛡️ [HG3 PASS] Cost safety verified: ${current_estimated_cost}")
+
+    # 2. 생산 실행 (Actionable Protocol)
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
     if not queue:
-        print("⚠️ [Wait] No new assets to produce. System idling.")
+        print("⚠️ No pending tasks. System idling.")
         return
 
-    print(f"🚀 [Production] Starting line for {len(queue)} items.")
-    
-    # 3. 생산 프로세스 실행
     for item in queue:
         try:
-            # 자산 생성 및 스키마 검수 (HG2)
+            # 개별 생산 단위 리스크 격리 (Isolating)
             data = generate_asset(item['id'], item['title'])
-            validate(instance=data, schema=SCHEMA)
+            validate(instance=data, schema=SCHEMA) # HG2 품질 검수
             
-            # 압축 저장 및 자산화 (HG4)
-            file_path = OUT_DIR / f"{item['id']}.json.gz"
-            with gzip.open(file_path, "wb") as f:
+            with gzip.open(OUT_DIR / f"{item['id']}.json.gz", "wb") as f:
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
             processed_ids.append(item['id'])
-            print(f"✅ [Asset Created] ID: {item['id']} | Title: {item['title'][:30]}")
+            print(f"✅ [Produced] ID: {item['id']}")
             
         except Exception as e:
-            print(f"❌ [Production Fail] ID: {item['id']} | Reason: {str(e)}")
-            continue # 개별 실패가 전체 시스템 중단으로 번지지 않도록 격리(Isolating)
-            
-    # 4. 상태 기록 및 동기화
-    final_state = {"processed_ids": sorted(list(set(processed_ids)))}
-    STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
-    print(f"📊 [Update] Production cycle complete. Total assets: {len(processed_ids)}")
+            print(f"❌ [Bypassed] ID: {item['id']} due to error: {e}")
+            continue 
+
+    # 3. 상태 기록 및 동기화
+    STATE_PATH.write_text(json.dumps({"processed_ids": sorted(list(set(processed_ids)))}, indent=2))
 
 if __name__ == "__main__":
     main()
+

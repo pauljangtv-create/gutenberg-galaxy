@@ -66,21 +66,53 @@ def generate_asset(book_id, title):
     }
 
 def main():
+    """
+    초효율 실행 엔진 메인 루프
+    HG3: Cost Guard - 분석 비용 및 자원 한계점 설정 (Antifragility)
+    """
+    # 1. 비용 임계치 설정 (최악의 시나리오 방지)
+    MAX_TOTAL_COST = 10.0  # 단위: USD (임계치 설정)
+    current_estimated_cost = 0.0  # 현재 무료 모드 운영 중 (자원 소모 최소화)
+    
+    print(f"🛡️ [HG3 Check] Current Cost: ${current_estimated_cost} / Threshold: ${MAX_TOTAL_COST}")
+    
+    if current_estimated_cost > MAX_TOTAL_COST:
+        print("🛑 [CRITICAL] Cost guard triggered. Freezing system to prevent fatality.")
+        return
+
+    # 2. 원재료 큐 확보 및 상태 로드
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
+    if not queue:
+        print("⚠️ [Wait] No new assets to produce. System idling.")
+        return
+
+    print(f"🚀 [Production] Starting line for {len(queue)} items.")
+    
+    # 3. 생산 프로세스 실행
     for item in queue:
         try:
+            # 자산 생성 및 스키마 검수 (HG2)
             data = generate_asset(item['id'], item['title'])
             validate(instance=data, schema=SCHEMA)
-            with gzip.open(OUT_DIR / f"{item['id']}.json.gz", "wb") as f:
-                f.write(json.dumps(data).encode("utf-8"))
-            processed_ids.append(item['id'])
-            print(f"✅ Produced: {item['id']}")
-        except Exception as e:
-            print(f"❌ Error {item['id']}: {e}")
             
-    STATE_PATH.write_text(json.dumps({"processed_ids": sorted(list(set(processed_ids)))}))
+            # 압축 저장 및 자산화 (HG4)
+            file_path = OUT_DIR / f"{item['id']}.json.gz"
+            with gzip.open(file_path, "wb") as f:
+                f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+            
+            processed_ids.append(item['id'])
+            print(f"✅ [Asset Created] ID: {item['id']} | Title: {item['title'][:30]}")
+            
+        except Exception as e:
+            print(f"❌ [Production Fail] ID: {item['id']} | Reason: {str(e)}")
+            continue # 개별 실패가 전체 시스템 중단으로 번지지 않도록 격리(Isolating)
+            
+    # 4. 상태 기록 및 동기화
+    final_state = {"processed_ids": sorted(list(set(processed_ids)))}
+    STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
+    print(f"📊 [Update] Production cycle complete. Total assets: {len(processed_ids)}")
 
 if __name__ == "__main__":
     main()

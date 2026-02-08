@@ -1,0 +1,29 @@
+name: daily-publish
+on:
+  schedule:
+    - cron: "0 0 * * *" # 매일 자정 자동 실행
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Audit
+        run: python auditor.py
+      - name: Run Factory
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python factory.py
+      - name: Push Changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || (git commit -m "auto: daily asset update" && git push)

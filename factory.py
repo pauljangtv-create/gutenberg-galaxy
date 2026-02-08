@@ -89,6 +89,23 @@ def generate_asset(book_id, title):
         "keywords": ["strategy", "optimization"]
     }
 
+def generate_sitemap(processed_ids):
+    """모든 자산을 구글에 신고하기 위한 sitemap.xml 생성"""
+    base_url = "https://pauljangtv-create.github.io/gutenberg-galaxy/"
+    sitemap_content = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    
+    # 메인 페이지
+    sitemap_content.append(f"<url><loc>{base_url}</loc><priority>1.0</priority></url>")
+    
+    # 개별 도서 자산 (최근 5,000개 제한 - 구글 권장사항)
+    for bid in processed_ids[-5000:]:
+        sitemap_content.append(f"<url><loc>{base_url}?id={bid}</loc><priority>0.8</priority></url>")
+        
+    sitemap_content.append('</urlset>')
+    Path("sitemap.xml").write_text("\n".join(sitemap_content), encoding="utf-8")
+    Path("robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base_url}sitemap.xml", encoding="utf-8")
+    print("✅ Sitemap generated for SEO")
+
 def main():
     """
     [Antifragile Control System]
@@ -130,23 +147,6 @@ def main():
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
             processed_ids.append(item['id'])
-
-            def generate_sitemap(processed_ids):
-    """모든 자산을 구글에 신고하기 위한 sitemap.xml 생성"""
-    base_url = "https://[사용자-아이디].github.io/gutenberg-galaxy/"
-    sitemap_content = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    
-    # 메인 페이지
-    sitemap_content.append(f"<url><loc>{base_url}</loc><priority>1.0</priority></url>")
-    
-    # 개별 도서 자산 (최근 5,000개 제한 - 구글 권장사항)
-    for bid in processed_ids[-5000:]:
-        sitemap_content.append(f"<url><loc>{base_url}?id={bid}</loc><priority>0.8</priority></url>")
-        
-    sitemap_content.append('</urlset>')
-    Path("sitemap.xml").write_text("\n".join(sitemap_content), encoding="utf-8")
-    Path("robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base_url}sitemap.xml", encoding="utf-8")
-
             print(f"✅ Produced: {item['id']}")
             
         except Exception as e:
@@ -156,6 +156,9 @@ def main():
     # 3. 상태 기록 및 동기화
     final_state = {"processed_ids": sorted(list(set(processed_ids)))}
     STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
+    
+    # 4. SEO: Sitemap 생성
+    generate_sitemap(processed_ids)
 
 if __name__ == "__main__":
     main()

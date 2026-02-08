@@ -1,1 +1,4 @@
-jsonschema==4.23.0
+jsonschema
+pako
+requests
+pandas

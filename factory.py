@@ -18,29 +18,34 @@ def load_processed_ids():
     except: return set()
 
 def fetch_work_queue():
-    """Pandas 없이 대용량 CSV를 스트리밍 방식으로 읽어 200권 추출"""
     processed = load_processed_ids()
-    resp = requests.get(INDEX_URL)
-    resp.encoding = 'utf-8'
     
-    # CSV 파싱 (메모리 효율적)
+    try:
+        resp = requests.get(INDEX_URL, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"❌ Network error: {e}")
+        return []
+    
+    resp.encoding = 'utf-8'
     lines = resp.text.splitlines()
     reader = csv.DictReader(lines)
     
-    # 컬럼명 유연성 확보 (Downloads 또는 Download Count 대응)
-    possible_keys = ['Downloads', 'Download Count', 'downloads']
-    actual_key = next((k for k in possible_keys if k in reader.fieldnames), None)
+    # 컬럼명 정규화
+    fieldnames = {k.strip(): k for k in reader.fieldnames}
     
-    # 데이터 리스트화 및 정렬
+    possible_keys = ['Downloads', 'Download Count', 'downloads']
+    actual_key = next((fieldnames.get(k) for k in possible_keys if fieldnames.get(k)), None)
+    
     all_books = list(reader)
     if actual_key:
-        all_books.sort(key=lambda x: int(x[actual_key] or 0), reverse=True)
+        all_books.sort(key=lambda x: int(x.get(actual_key, 0) or 0), reverse=True)
     
     queue = []
     for row in all_books:
-        book_id = str(row['Text#'])
-        if book_id not in processed:
-            queue.append({"id": book_id, "title": row['Title']})
+        book_id = row.get('Text#', '').strip()
+        if book_id and book_id not in processed:
+            queue.append({"id": book_id, "title": row.get('Title', 'Unknown')})
         if len(queue) >= MAX_BOOKS: break
     return queue
 

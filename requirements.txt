@@ -1,4 +1,3 @@
 jsonschema
 pako
 requests
-pandas

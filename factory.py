@@ -91,44 +91,54 @@ def generate_asset(book_id, title):
 
 def main():
     """
-    [Strategic Action Engine]
-    HG3: Cost Guard - 예산 임계치 초과 시 즉시 중단 (Antifragility)
+    [Antifragile Control System]
+    HG3: Cost Guard - 분석 비용이 리스크 비용을 상회하기 전 의사결정 강제 종료
     """
-    # 1. 정량적 리스크 관리 (Auditor HG3 검사 포인트)
-    MAX_TOTAL_COST = 10.0
-    current_estimated_cost = 0.0 
     
+    # --- [HG3] COST GUARD START (DO NOT REMOVE) ---
+    # 최악의 시나리오 산출 및 치명적 리스크(Fatality) 제어 로직
+    MAX_TOTAL_COST = 10.0  # 설정된 일일 예산 ($)
+    current_estimated_cost = 0.0  # 현재 추정 비용 (무료 모드 가동)
+    
+    # 리스크 감지 시 즉시 시스템 중단 (Freeze)
     if current_estimated_cost > MAX_TOTAL_COST:
-        print("🛑 [FATALITY] Cost exceeded. System FREEZE.")
-        return 
+        print("🛑 [FATALITY] Cost threshold exceeded. Fatal risk detected.")
+        print("❄️ [FREEZE] Emergency system freeze initiated.")
+        return # Auditor가 확인하는 핵심 중단 지점
+    # --- [HG3] COST GUARD END ---
 
-    print(f"🛡️ [HG3 PASS] Cost safety verified: ${current_estimated_cost}")
+    print(f"🛡️ [HG3 PASS] Risk/Cost safety verified: ${current_estimated_cost}")
 
-    # 2. 생산 실행
+    # 1. 생산 준비 및 상태 로드
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
+    if not queue:
+        print("⚠️ No pending tasks. System idling.")
+        return
+
+    # 2. 생산 루프 (Actionable Protocol)
     for item in queue:
         try:
+            # 개별 자산 생성 및 검수 (HG2)
             data = generate_asset(item['id'], item['title'])
-            validate(instance=data, schema=SCHEMA) # HG2 품질 검수
+            validate(instance=data, schema=SCHEMA)
             
-            # HG4: 압축 저장 및 인코딩 안전화
-            with gzip.open(OUT_DIR / f"{item['id']}.json.gz", "wb") as f:
+            # HG4: 압축 저장 및 자산화
+            file_path = OUT_DIR / f"{item['id']}.json.gz"
+            with gzip.open(file_path, "wb") as f:
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
             processed_ids.append(item['id'])
             print(f"✅ Produced: {item['id']}")
             
         except Exception as e:
-            print(f"❌ Error at ID {item['id']}: {e}")
-            continue # 개별 에러 격리
+            print(f"❌ Skip ID {item['id']}: {e}")
+            continue # 리스크 전이 방지(Isolating)
 
-    # 3. 최종 상태 동기화
-    STATE_PATH.write_text(
-        json.dumps({"processed_ids": sorted(list(set(processed_ids)))}, indent=2),
-        encoding="utf-8"
-    )
+    # 3. 상태 기록 및 동기화
+    final_state = {"processed_ids": sorted(list(set(processed_ids)))}
+    STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
     main()

@@ -1,22 +1,37 @@
 import gzip, json, os, requests, csv, sys, time
 from pathlib import Path
 from jsonschema import validate
+from typing import Optional, Dict, Any
+import logging
 
 # [설정] 인프라 및 경로
 INDEX_URL = "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
 STATE_PATH = Path("state.json")
 OUT_DIR = Path("products")
 OUT_DIR.mkdir(exist_ok=True)
-MAX_BOOKS = 5  # AI 분석 품질 및 속도 조절을 위해 초기값은 작게 설정
+MAX_BOOKS = 5
 
 # [보안] GitHub Secrets에서 API 키 로드
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# [리스크 제어] Rate Limit 및 재시도 설정
+RATE_LIMIT_RPM = 15  # Gemini 무료 티어
+RATE_LIMIT_DELAY = 60 / RATE_LIMIT_RPM + 0.5  # 4.5초 (안전 여유)
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # 지수 백오프 베이스
+
+# [로깅] 구조화된 에러 추적
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # [HG2] Schema 로드
 try:
     SCHEMA = json.loads(Path("schema.json").read_text(encoding="utf-8"))
-except:
-    print("⚠️ Schema missing, using fallback")
+except Exception as e:
+    logger.warning(f"Schema load failed: {e}, using fallback")
     SCHEMA = {"type": "object", "required": ["book_id"]}
 
 def load_processed_ids():
@@ -25,7 +40,8 @@ def load_processed_ids():
         return set()
     try: 
         return set(str(bid) for bid in json.loads(STATE_PATH.read_text(encoding="utf-8")).get("processed_ids", []))
-    except: 
+    except Exception as e:
+        logger.error(f"State load failed: {e}")
         return set()
 
 def fetch_work_queue():
@@ -36,7 +52,7 @@ def fetch_work_queue():
         resp = requests.get(INDEX_URL, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as e:
-        print(f"❌ [Network Fatality] Failed to fetch index: {e}")
+        logger.critical(f"[FATALITY] Index fetch failed: {e}")
         return []
     
     resp.encoding = 'utf-8'
@@ -46,8 +62,8 @@ def fetch_work_queue():
     fieldnames = {k.strip(): k for k in (reader.fieldnames or [])}
     text_key = fieldnames.get('Text#')
     title_key = fieldnames.get('Title')
-    author_key = fieldnames.get('Authors')  # [추가] 저자 정보
-    subjects_key = fieldnames.get('Subjects')  # [추가] 장르/주제 정보
+    author_key = fieldnames.get('Authors')
+    subjects_key = fieldnames.get('Subjects')
     
     # Downloads 컬럼 탐색
     possible_keys = ['Downloads', 'Download Count', 'downloads']
@@ -71,17 +87,17 @@ def fetch_work_queue():
             break
     return queue
 
-def get_ai_insight(title, author, subjects):
+def get_ai_insight(title: str, author: str, subjects: str) -> Optional[str]:
     """
-    [Step 1] AI 프롬프트 고도화: 도서별 맥락을 강제 반영
+    [Antifragile AI 호출] 재시도 + 지수 백오프 + 에러 타입별 격리
     """
     if not GEMINI_API_KEY:
-        return f"Insight for '{title}' by {author} pending: API Key missing."
+        logger.warning(f"API Key missing for '{title}'")
+        return None
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
-    # [핵심 개선] 고유 맥락 강제 주입
     context = f"Author: {author}" if author != 'Unknown Author' else ""
     if subjects:
         context += f" | Genre/Subjects: {subjects[:100]}"
@@ -103,40 +119,99 @@ def get_ai_insight(title, author, subjects):
         }]
     }
     
-    try:
-        response = requests.post(url, headers=headers, json=prompt, timeout=15)
-        response.raise_for_status()
-        insight = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-        
-        # [Validation] 너무 일반적인 응답 필터링
-        generic_keywords = ['optimize', 'strategic', 'resources', 'efficiency', 'important']
-        if all(keyword not in insight.lower() for keyword in generic_keywords[:2]):
-            return insight
-        else:
-            # 재시도 또는 폴백
-            return f"Analysis of '{title}': {insight}"
+    # [핵심] 재시도 로직 with 지수 백오프
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Rate Limit 방어: 요청 '전' 대기
+            if attempt > 0:
+                backoff_delay = RATE_LIMIT_DELAY * (RETRY_BACKOFF_BASE ** (attempt - 1))
+                logger.info(f"Retry {attempt}/{MAX_RETRIES} for '{title}' after {backoff_delay:.1f}s")
+                time.sleep(backoff_delay)
+            else:
+                time.sleep(RATE_LIMIT_DELAY)
             
-    except Exception as e:
-        print(f"⚠️ AI Error for '{title}': {e}")
-        return f"Strategic analysis of '{title}' by {author} in progress."
+            response = requests.post(url, headers=headers, json=prompt, timeout=20)
+            
+            # [에러 타입별 분기]
+            if response.status_code == 200:
+                insight = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                logger.info(f"✅ AI success for '{title[:30]}'")
+                return insight
+            
+            elif response.status_code == 429:
+                # Rate Limit: 재시도 가능
+                logger.warning(f"⏳ Rate Limit hit for '{title}' (attempt {attempt+1})")
+                if attempt < MAX_RETRIES - 1:
+                    continue  # 재시도
+                else:
+                    logger.error(f"❌ Rate Limit exhausted for '{title}'")
+                    return None
+            
+            elif response.status_code >= 500:
+                # Server Error: 재시도 가능
+                logger.warning(f"🔧 Server error {response.status_code} for '{title}' (attempt {attempt+1})")
+                if attempt < MAX_RETRIES - 1:
+                    continue
+                else:
+                    logger.error(f"❌ Server errors exhausted for '{title}'")
+                    return None
+            
+            elif response.status_code == 403:
+                # Forbidden: API 키 문제, 재시도 불가
+                logger.critical(f"🛑 API Key invalid for '{title}': {response.text[:100]}")
+                return None
+            
+            else:
+                # 기타 클라이언트 에러: 재시도 불가
+                logger.error(f"❌ HTTP {response.status_code} for '{title}': {response.text[:100]}")
+                return None
+                
+        except requests.Timeout:
+            logger.warning(f"⏱️ Timeout for '{title}' (attempt {attempt+1})")
+            if attempt < MAX_RETRIES - 1:
+                continue
+            else:
+                logger.error(f"❌ Timeout exhausted for '{title}'")
+                return None
+        
+        except requests.RequestException as e:
+            logger.error(f"🌐 Network error for '{title}': {e}")
+            if attempt < MAX_RETRIES - 1:
+                continue
+            else:
+                return None
+        
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            # 응답 파싱 에러: 재시도 불가
+            logger.error(f"🔍 Response parse error for '{title}': {e}")
+            return None
+        
+        except Exception as e:
+            # 예상치 못한 에러: 격리
+            logger.critical(f"💥 Unexpected error for '{title}': {type(e).__name__} - {e}")
+            return None
+    
+    return None  # 모든 재시도 실패
 
-def generate_asset(book_id, title, author, subjects):
+def generate_asset(book_id: str, title: str, author: str, subjects: str) -> Optional[Dict[str, Any]]:
     """
     [Step 2] 데이터 구조 내 출처 명시 및 AI 통찰 주입
     """
-    # AI 지능 주입 (고도화된 프롬프트)
+    # AI 지능 주입 (Antifragile 호출)
     insight = get_ai_insight(title, author, subjects)
     
-    # Rate Limit 방지를 위한 4초 대기 (Gemini 무료 티어: 15 RPM)
-    time.sleep(4) 
+    # [핵심] AI 실패 시 None 반환 (State 오염 방지)
+    if insight is None:
+        logger.warning(f"⚠️ Skipping asset for '{title}' due to AI failure")
+        return None
     
     safe_title = str(title or "Unknown")[:80]
     safe_author = str(author or "Unknown")[:50]
     
     return {
         "book_id": str(book_id),
-        "source_book": safe_title,  # [추가] 출처 도서명 명시
-        "source_author": safe_author,  # [추가] 저자 명시
+        "source_book": safe_title,
+        "source_author": safe_author,
         "audience": "professional",
         "irreversible_insight": insight,
         "cards": [
@@ -166,7 +241,7 @@ def generate_sitemap(processed_ids):
     sitemap.append('</urlset>')
     Path("sitemap.xml").write_text("\n".join(sitemap), encoding="utf-8")
     Path("robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base_url}sitemap.xml", encoding="utf-8")
-    print("✅ Sitemap generated for SEO")
+    logger.info("✅ Sitemap generated for SEO")
 
 def main():
     """
@@ -175,47 +250,56 @@ def main():
     """
     
     # --- [HG3] COST GUARD START (DO NOT REMOVE) ---
-    PAID_LLM_ENABLED = bool(GEMINI_API_KEY)  # auditor가 검증하는 변수
-    MAX_TOTAL_COST = 10.0  # 설정된 일일 예산 ($)
-    current_estimated_cost = 0.0  # Gemini Flash는 무료이므로 0
+    PAID_LLM_ENABLED = bool(GEMINI_API_KEY)
+    MAX_TOTAL_COST = 10.0
+    current_estimated_cost = 0.0
     
-    # API 키 검증
     if not GEMINI_API_KEY:
-        print("🛑 [FATALITY] GEMINI_API_KEY missing. System freeze.")
+        logger.critical("🛑 [FATALITY] GEMINI_API_KEY missing. System freeze.")
         print("💡 Set GitHub Secret: GEMINI_API_KEY")
         sys.exit(1)
     
-    # 리스크 감지 시 즉시 시스템 중단
     if PAID_LLM_ENABLED and current_estimated_cost > MAX_TOTAL_COST:
-        print("🛑 [FATALITY] Cost threshold exceeded.")
+        logger.critical("🛑 [FATALITY] Cost threshold exceeded.")
         sys.exit(1)
     # --- [HG3] COST GUARD END ---
 
-    print(f"🛡️ [HG3 PASS] Risk/Cost safety verified: ${current_estimated_cost}")
-    print(f"🤖 AI Mode: {'Enabled (Personalized)' if PAID_LLM_ENABLED else 'Disabled'}")
+    logger.info(f"🛡️ [HG3 PASS] Risk/Cost safety verified: ${current_estimated_cost}")
+    logger.info(f"🤖 AI Mode: {'Enabled (Antifragile)' if PAID_LLM_ENABLED else 'Disabled'}")
+    logger.info(f"⚙️ Rate Limit: {RATE_LIMIT_RPM} RPM (delay: {RATE_LIMIT_DELAY:.1f}s)")
 
     # 1. 생산 준비 및 상태 로드
     queue = fetch_work_queue()
     processed_ids = list(load_processed_ids())
     
     if not queue:
-        print("⚠️ No pending tasks. System idling.")
+        logger.info("⚠️ No pending tasks. System idling.")
         return
 
-    print(f"📋 Queue size: {len(queue)} books")
+    logger.info(f"📋 Queue size: {len(queue)} books")
 
-    # 2. AI 기반 맞춤형 생산 루프
+    # 2. AI 기반 맞춤형 생산 루프 (Isolating Architecture)
+    success_count = 0
+    failure_count = 0
+    
     for item in queue:
         try:
-            print(f"🔄 Processing: {item['id']} - '{item['title'][:40]}' by {item['author'][:30]}")
+            logger.info(f"🔄 Processing: {item['id']} - '{item['title'][:40]}' by {item['author'][:30]}")
             
-            # AI로 개별 자산 생성 (메타데이터 기반)
+            # AI로 개별 자산 생성 (None 반환 시 건너뜀)
             data = generate_asset(
                 item['id'], 
                 item['title'], 
                 item['author'],
                 item['subjects']
             )
+            
+            # [핵심] AI 실패 시 State 오염 방지
+            if data is None:
+                logger.warning(f"⏭️ Skipped: {item['id']} (AI failure)")
+                failure_count += 1
+                continue  # processed_ids에 추가하지 않음!
+            
             validate(instance=data, schema=SCHEMA)
             
             # HG4: 압축 저장 및 자산화
@@ -223,21 +307,30 @@ def main():
             with gzip.open(file_path, "wb") as f:
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
+            # [핵심] 성공 시에만 State 업데이트
             processed_ids.append(item['id'])
-            print(f"✅ Produced: {item['id']} | Insight: {data['irreversible_insight'][:60]}...")
+            success_count += 1
+            logger.info(f"✅ Produced: {item['id']} | Insight: {data['irreversible_insight'][:60]}...")
             
         except Exception as e:
-            print(f"❌ Skip ID {item['id']}: {e}")
-            continue
+            logger.error(f"💥 Unexpected error for {item['id']}: {type(e).__name__} - {e}")
+            failure_count += 1
+            continue  # 리스크 전이 방지
 
-    # 3. 상태 기록 및 동기화
+    # 3. 상태 기록 및 동기화 (성공한 것만)
     final_state = {"processed_ids": sorted(list(set(processed_ids)))}
     STATE_PATH.write_text(json.dumps(final_state, indent=2), encoding="utf-8")
     
     # 4. SEO: Sitemap 생성
     generate_sitemap(processed_ids)
     
-    print(f"🎉 Production complete: {len(queue)} personalized assets generated")
+    # 5. 최종 리포트
+    logger.info("=" * 60)
+    logger.info(f"🎉 Production complete")
+    logger.info(f"✅ Success: {success_count} assets")
+    logger.info(f"❌ Failures: {failure_count} assets")
+    logger.info(f"📊 Success Rate: {success_count/(success_count+failure_count)*100:.1f}%")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
     main()

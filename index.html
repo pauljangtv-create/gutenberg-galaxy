@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gutenberg Galaxy: Insight Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4">
+    <div id="app" class="max-w-md mx-auto space-y-6">
+        <header class="text-center py-8">
+            <h1 class="text-3xl font-bold text-cyan-400">Gutenberg Galaxy</h1>
+            <p class="text-slate-400 text-sm">Autonomous Intellectual Assets</p>
+        </header>
+        <div id="viewer" class="space-y-4">
+            <p class="text-center animate-pulse">Scanning Galaxy Assets...</p>
+        </div>
+    </div>
+
+    <script>
+        async function loadInsight(bookId) {
+            try {
+                const response = await fetch(`products/${bookId}.json.gz`);
+                const arrayBuffer = await response.arrayBuffer();
+                const decompressed = pako.ungzip(new Uint8Array(arrayBuffer), { to: 'string' });
+                const data = JSON.parse(decompressed);
+                
+                render(data);
+            } catch (e) {
+                document.getElementById('viewer').innerHTML = `<p class="text-red-400">Asset not found. Run Factory first.</p>`;
+            }
+        }
+
+        function render(data) {
+            const viewer = document.getElementById('viewer');
+            viewer.innerHTML = `
+                <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+                    <span class="text-xs font-mono text-cyan-500 uppercase">Book ID: ${data.book_id}</span>
+                    <h2 class="text-xl font-bold mt-2 mb-4">${data.irreversible_insight}</h2>
+                    <div class="space-y-2">
+                        ${data.cards.map(card => `<div class="bg-slate-700/50 p-3 rounded-lg text-sm border-l-4 border-cyan-500">${card}</div>`).join('')}
+                    </div>
+                </div>
+            `;
+        }
+        
+        // 초기 테스트용: alice_in_wonderland 로드 (실제로는 index.json 기반 루프 필요)
+        loadInsight('alice_in_wonderland');
+    </script>
+</body>
+</html>

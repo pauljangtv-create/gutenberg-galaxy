@@ -18,6 +18,8 @@ jobs:
       - name: Audit
         run: python auditor.py
       - name: Run Factory
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python factory.py
       - name: Push Changes
         run: |

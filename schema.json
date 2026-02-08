@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["book_id", "audience", "irreversible_insight", "cards", "quiz", "script_60s", "keywords"],
+  "properties": {
+    "book_id": { "type": "string" },
+    "audience": { "type": "string" },
+    "irreversible_insight": { "type": "string", "minLength": 20 },
+    "cards": { "type": "array", "minItems": 3 },
+    "quiz": { "type": "array", "minItems": 3 },
+    "script_60s": { "type": "string" },
+    "keywords": { "type": "array", "minItems": 3 }
+  }
+}

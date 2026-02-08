@@ -17,13 +17,15 @@ jobs:
         run: pip install -r requirements.txt
       - name: Audit
         run: python auditor.py
-      - name: Run Factory
+      - name: Run Hybrid Factory
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python factory.py
       - name: Push Changes
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git diff --quiet && git diff --staged --quiet || (git commit -m "auto: daily asset update" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "auto: hybrid AI asset update" && git push)

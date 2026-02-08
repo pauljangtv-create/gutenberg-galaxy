@@ -130,6 +130,23 @@ def main():
                 f.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             
             processed_ids.append(item['id'])
+
+            def generate_sitemap(processed_ids):
+    """모든 자산을 구글에 신고하기 위한 sitemap.xml 생성"""
+    base_url = "https://[사용자-아이디].github.io/gutenberg-galaxy/"
+    sitemap_content = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    
+    # 메인 페이지
+    sitemap_content.append(f"<url><loc>{base_url}</loc><priority>1.0</priority></url>")
+    
+    # 개별 도서 자산 (최근 5,000개 제한 - 구글 권장사항)
+    for bid in processed_ids[-5000:]:
+        sitemap_content.append(f"<url><loc>{base_url}?id={bid}</loc><priority>0.8</priority></url>")
+        
+    sitemap_content.append('</urlset>')
+    Path("sitemap.xml").write_text("\n".join(sitemap_content), encoding="utf-8")
+    Path("robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base_url}sitemap.xml", encoding="utf-8")
+
             print(f"✅ Produced: {item['id']}")
             
         except Exception as e:

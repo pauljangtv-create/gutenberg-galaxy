@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://pauljangtv-create.github.io/gutenberg-galaxy/sitemap.xml

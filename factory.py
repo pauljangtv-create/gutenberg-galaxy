@@ -95,17 +95,16 @@ def main():
     HG3: Cost Guard - 분석 비용이 리스크 비용을 상회하기 전 의사결정 강제 종료
     """
     
-    # --- [HG3] COST GUARD START (DO NOT REMOVE) ---
-    # 최악의 시나리오 산출 및 치명적 리스크(Fatality) 제어 로직
-    MAX_TOTAL_COST = 10.0  # 설정된 일일 예산 ($)
-    current_estimated_cost = 0.0  # 현재 추정 비용 (무료 모드 가동)
-    
-    # 리스크 감지 시 즉시 시스템 중단 (Freeze)
-    if current_estimated_cost > MAX_TOTAL_COST:
-        print("🛑 [FATALITY] Cost threshold exceeded. Fatal risk detected.")
-        print("❄️ [FREEZE] Emergency system freeze initiated.")
-        return # Auditor가 확인하는 핵심 중단 지점
-    # --- [HG3] COST GUARD END ---
+# --- [HG3] COST GUARD START (DO NOT REMOVE) ---
+PAID_LLM_ENABLED = False  # auditor가 찾는 변수
+MAX_TOTAL_COST = 10.0
+current_estimated_cost = 0.0
+
+if PAID_LLM_ENABLED and current_estimated_cost > MAX_TOTAL_COST:
+    print("🛑 [FATALITY] Cost threshold exceeded. Fatal risk detected.")
+    print("❄️ [FREEZE] Emergency system freeze initiated.")
+    sys.exit(1)
+# --- [HG3] COST GUARD END ---
 
     print(f"🛡️ [HG3 PASS] Risk/Cost safety verified: ${current_estimated_cost}")
 

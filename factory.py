@@ -21,17 +21,24 @@ def sample_text(text, chunk=4000):
     return f"{text[:chunk]}\n...\n{text[len(text)//2-chunk//2 : len(text)//2+chunk//2]}\n...\n{text[-chunk:]}"
 
 def generate_fallback(book_id):
-    """무료 폴백 모드: 비용 0원 유지용 템플릿"""
+    """무료 폴백 모드: schema.json의 minItems: 3 기준 충족 버전"""
     return {
         "book_id": book_id,
         "audience": "professional",
-        "irreversible_insight": "Strategic focus: identify non-reversible costs before action.",
-        "cards": ["Define constraints", "Assess irreversible loss", "Act on smallest step"],
-        "quiz": [{"q": "What is the first step?", "a": "Define constraints"}],
-        "script_60s": "Focus on what you cannot recover.",
-        "keywords": ["strategy", "decision-making", "efficiency"]
+        "irreversible_insight": "Strategic focus: identify non-reversible costs before action and ensure schema compliance.",
+        "cards": [
+            "Step 1: Define constraints", 
+            "Step 2: Assess irreversible loss", 
+            "Step 3: Act on smallest step"
+        ],
+        "quiz": [
+            {"q": "What is the first step?", "a": "Define constraints"},
+            {"q": "What is the second step?", "a": "Assess loss"},
+            {"q": "What is the third step?", "a": "Smallest action"}
+        ],
+        "script_60s": "Focus on what you cannot recover. Always ensure your output matches the defined schema requirements.",
+        "keywords": ["strategy", "decision-making", "compliance"]
     }
-
 def process_book(path):
     book_id = path.stem
     text = path.read_text(encoding="utf-8", errors="ignore")

@@ -70,9 +70,10 @@ def main():
     초효율 실행 엔진 메인 루프
     HG3: Cost Guard - 분석 비용 및 자원 한계점 설정 (Antifragility)
     """
-    # 1. 비용 임계치 설정 (최악의 시나리오 방지)
-    MAX_TOTAL_COST = 10.0  # 단위: USD (임계치 설정)
-    current_estimated_cost = 0.0  # 현재 무료 모드 운영 중 (자원 소모 최소화)
+    # 1. [HG3] 비용 임계치 설정 (최악의 시나리오 방지)
+    # 분석 비용이 설정된 예산을 초과할 경우 즉시 시스템 중단(Freeze)
+    MAX_TOTAL_COST = 10.0  # 단위: USD
+    current_estimated_cost = 0.0  # 현재 무료 모드 운영 (추후 유료 LLM 연동 시 가산)
     
     print(f"🛡️ [HG3 Check] Current Cost: ${current_estimated_cost} / Threshold: ${MAX_TOTAL_COST}")
     
